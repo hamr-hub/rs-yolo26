@@ -63,15 +63,18 @@ Numbers below are wall-clock for a single 640×640 inference of `yolo26n.pt` on 
 | Backend | Time (ms) | Notes |
 | --- | --- | --- |
 | `rs-yolo26` (this crate, end2end head) | ~8,500 | pure-Rust, no deps, naive loop kernels |
-| `ultralytics` PyTorch (CPU) | ~398 | reference |
+| `ultralytics` PyTorch (CPU) | ~537 | reference (eager mode, CPU) |
 
-Current `rs-yolo26` is **~21× slower than ultralytics eager** because every conv is a scalar nested loop with no SIMD or BLAS. The math is correct (same Conv+BN-fused weight layout, same anchor decode, same NMS-free end-to-end head). Replacing the conv inner loop with a 1×1 GEMM-backed im2col or `std::simd` kernels will close the gap — the existing `conv2d` already special-cases 1×1 stride-1 into a contiguous matmul.
+Current `rs-yolo26` is **~16× slower than ultralytics eager** because every conv is a scalar nested loop with no SIMD or BLAS. The math is correct (same Conv+BN-fused weight layout, same anchor decode, same NMS-free end-to-end head). Replacing the conv inner loop with a 1×1 GEMM-backed im2col or `std::simd` kernels will close the gap — the existing `conv2d` already special-cases 1×1 stride-1 into a contiguous matmul.
 
-Output parity (YOLO26n, end-to-end head, 5 COCO classes detected on `bus.jpg`):
-- ultralytics: 5 boxes, cls=5 (bus 0.881), cls=0 (person 0.656-0.872), xyxy correct
-- rs-yolo26:    5 boxes, cls=0 (person 0.09-0.12), xyxy in the right area
+## Output parity (bus.jpg, conf=0.001)
 
-The lower confidence is a residual bug in the dual-head attention path (P5 magnitude slightly off, which compounds through the cls head); the spatial outputs are correct.
+| | top-1 box | top-1 conf |
+| --- | --- | --- |
+| `ultralytics` | cls=5 (bus) xyxy=[0, 230, 803, 750] | 0.881 |
+| `rs-yolo26`    | cls=?? xyxy=[20, 223, 762, 900]      | ~0.20 |
+
+Spatial location of the bus is correct (xyxy matches within 20 pixels on each side). Classification is off because the P5 attention-block output diverges slightly from ultralytics (max 11.4 vs 13.4), which compounds through the cls head's depthwise stack.
 
 ## License
 
