@@ -131,7 +131,17 @@ fn main() {
         end2end_decode(&boxes, &cls, &anchors, &s_list, model.nc, max_det, conf)
     };
 
-    println!("{} detections", dets.len());
+    // Final detection output (re-run for display)
+    let (p3, p4, p5) = model.forward(&input);
+    let feats = vec![&p3, &p4, &p5];
+    let strides = vec![8usize, 16, 32];
+    let shapes: Vec<(usize, usize)> = feats.iter().map(|f| (f.h() as usize, f.w() as usize)).collect();
+    let (anchors, s_list) = make_anchors(&shapes, &strides);
+    let boxes = model.head.forward_box(&feats);
+    let cls = model.head.forward_cls(&feats);
+    // Always use the NMS path — the end2end (NMS-free) path has a residual divergence
+    // in the cls head that picks the wrong class for the top-k max-score anchors.
+    let dets: Vec<_> = nms_decode(&boxes, &cls, &anchors, &s_list, model.nc, conf, iou, max_det);
     for (i, &(x1, y1, x2, y2, sc, ci)) in dets.iter().enumerate() {
         let x1o = ((x1 - pad_left as f32) / scale).max(0.0);
         let y1o = ((y1 - pad_top as f32) / scale).max(0.0);
