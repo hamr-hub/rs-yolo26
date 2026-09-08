@@ -121,7 +121,6 @@ fn main() {
         }
     }
     eprintln!("average over {} iters: {:?}", bench_iters, last_t);
-    eprintln!("feature map max: P3={:.3} P4={:.3} P5={:.3}", last_p3_max, last_p4_max, last_p5_max);
 
     // Final detection output (re-run for display)
     let (p3, p4, p5) = model.forward(&input);

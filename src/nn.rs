@@ -37,62 +37,112 @@ pub fn conv2d_grouped(input: &Tensor, weight: &Tensor, bias: &Tensor, stride: (u
     let o_strides = out.strides();
 
     if k_h == 1 && k_w == 1 && sh == 1 && sw == 1 {
+        // 1x1 stride-1: matmul over channel dim. This is the hot path for YOLO heads.
+        // Split work across threads by (batch, output-channel) tile.
         let spatial = h_out * w_out;
-        for ni in 0..n {
-            for g in 0..groups {
-                let i_base_g = g * c_per_group_in;
-                for o_local in 0..c_out_per_group {
-                    let o = g * c_out_per_group + o_local;
-                    let bias_o = bias.data[o];
-                    let w_base = o * c_per_group_in;
-                    for p in 0..spatial {
-                        let mut sum = bias_o;
-                        let in_base = ni * i_strides[0] + (i_base_g) * i_strides[1] + p;
-                        for i in 0..c_per_group_in {
-                            sum += weight.data[w_base + i] * input.data[in_base + i * i_strides[1]];
+        let total_jobs = n * c_out;
+        let n_threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(4).min(total_jobs).max(1);
+        let chunk = (total_jobs + n_threads - 1) / n_threads;
+        // SAFETY: each thread writes to disjoint (n, o) tiles of `out.data`,
+        // guaranteed by partitioning total_jobs = n * c_out by `chunk`.
+        let out_addr = out.data.as_mut_ptr() as usize;
+        let inp = input.data.clone();
+        let wgt = weight.data.clone();
+        let bia = bias.data.clone();
+        std::thread::scope(|s| {
+            for tid in 0..n_threads {
+                let start = tid * chunk;
+                let end = (start + chunk).min(total_jobs);
+                if start >= end { continue; }
+                let inp = &inp;
+                let wgt = &wgt;
+                let bia = &bia;
+                let out_addr = out_addr;
+                s.spawn(move || unsafe {
+                    let out_ptr = out_addr as *mut f32;
+                    for job in start..end {
+                        let ni = job / c_out;
+                        let o = job % c_out;
+                        let g = o / c_out_per_group;
+                        let i_base_g = g * c_per_group_in;
+                        let bias_o = bia[o];
+                        let w_base = o * c_per_group_in;
+                        let out_base_n = ni * o_strides[0] + o * o_strides[1];
+                        let in_base_n = ni * i_strides[0] + i_base_g * i_strides[1];
+                        for p in 0..spatial {
+                            let mut sum = bias_o;
+                            let mut in_off = in_base_n + p;
+                            let mut w_off = w_base;
+                            for i in 0..c_per_group_in {
+                                sum += wgt[w_off] * inp[in_off];
+                                in_off += i_strides[1];
+                                w_off += 1;
+                            }
+                            *out_ptr.add(out_base_n + p) = sum;
                         }
-                        out.data[ni * o_strides[0] + o * o_strides[1] + p] = sum;
                     }
-                }
+                });
             }
-        }
+        });
         return out;
     }
 
-    for ni in 0..n {
-        for g in 0..groups {
-            for o_local in 0..c_out_per_group {
-                let o = g * c_out_per_group + o_local;
-                let bias_o = bias.data[o];
-                for oh in 0..h_out {
-                    for ow in 0..w_out {
-                        let mut sum = bias_o;
-                        for i in 0..c_per_group_in {
-                            let ci = g * c_per_group_in + i;
-                            for kh in 0..k_h {
-                                let ih = oh * sh + kh;
-                                if ih < ph || ih >= h_in + ph {
-                                    continue;
-                                }
-                                let ih_idx = ih - ph;
-                                for kw in 0..k_w {
-                                    let iw = ow * sw + kw;
-                                    if iw < pw || iw >= w_in + pw {
+    // General case: split by output channel.
+    let total_jobs = n * c_out;
+    let n_threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(4).min(total_jobs).max(1);
+    let chunk = (total_jobs + n_threads - 1) / n_threads;
+    // SAFETY: each thread writes to disjoint (n, o) tiles.
+    let out_addr = out.data.as_mut_ptr() as usize;
+    let inp = input.data.clone();
+    let wgt = weight.data.clone();
+    let bia = bias.data.clone();
+    std::thread::scope(|s| {
+        for tid in 0..n_threads {
+            let start = tid * chunk;
+            let end = (start + chunk).min(total_jobs);
+            if start >= end { continue; }
+            let inp = &inp;
+            let wgt = &wgt;
+            let bia = &bia;
+            let out_addr = out_addr;
+            s.spawn(move || unsafe {
+                let out_ptr = out_addr as *mut f32;
+                for job in start..end {
+                    let ni = job / c_out;
+                    let o = job % c_out;
+                    let g = o / c_out_per_group;
+                    let bias_o = bia[o];
+                    let out_base = ni * o_strides[0] + o * o_strides[1];
+                    for oh in 0..h_out {
+                        for ow in 0..w_out {
+                            let mut sum = bias_o;
+                            for i in 0..c_per_group_in {
+                                let ci = g * c_per_group_in + i;
+                                for kh in 0..k_h {
+                                    let ih = oh * sh + kh;
+                                    if ih < ph || ih >= h_in + ph {
                                         continue;
                                     }
-                                    let iw_idx = iw - pw;
-                                    let in_off = ni * i_strides[0] + ci * i_strides[1] + ih_idx * i_strides[2] + iw_idx;
-                                    let w_off = ((o * c_per_group_in + i) * k_h + kh) * k_w + kw;
-                                    sum += input.data[in_off] * weight.data[w_off];
+                                    let ih_idx = ih - ph;
+                                    for kw in 0..k_w {
+                                        let iw = ow * sw + kw;
+                                        if iw < pw || iw >= w_in + pw {
+                                            continue;
+                                        }
+                                        let iw_idx = iw - pw;
+                                        let in_off = ni * i_strides[0] + ci * i_strides[1] + ih_idx * i_strides[2] + iw_idx;
+                                        let w_off = ((o * c_per_group_in + i) * k_h + kh) * k_w + kw;
+                                        sum += inp[in_off] * wgt[w_off];
+                                    }
                                 }
                             }
+                            *out_ptr.add(out_base + oh * o_strides[2] + ow) = sum;
                         }
-                        out.data[ni * o_strides[0] + o * o_strides[1] + oh * o_strides[2] + ow] = sum;
                     }
                 }
-            }
+            });
         }
-    }
+    });
     out
 }
 

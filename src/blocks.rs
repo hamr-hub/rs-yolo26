@@ -15,20 +15,16 @@ pub struct Bottleneck {
 
 impl Bottleneck {
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        // Both conv1 and conv2 use autopad = k/2 (Ultralytics default).
+        // Ultralytics Bottleneck: y = cv2(silu(cv1(x))); return x + y if add else y.
+        // cv1 and cv2 both include their own SiLU activation. No SiLU on the residual sum.
         let p1 = self.k1 / 2;
         let p2 = self.k2 / 2;
         let mut y = conv_silu(x, &self.cv1_w, &self.cv1_b, (1, 1), (p1, p1));
-        y = conv2d(&y, &self.cv2_w, &self.cv2_b, (1, 1), (p2, p2));
+        y = conv_silu(&y, &self.cv2_w, &self.cv2_b, (1, 1), (p2, p2));
         if self.add {
-            assert_eq!(y.shape, x.shape, "Bottleneck add shape mismatch: y={:?} x={:?}", y.shape, x.shape);
             for (yi, xi) in y.data.iter_mut().zip(x.data.iter()) {
                 *yi += *xi;
             }
-        }
-        for v in y.data.iter_mut() {
-            let x = *v;
-            *v = x / (1.0 + (-x).exp());
         }
         y
     }
