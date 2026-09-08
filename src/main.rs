@@ -105,22 +105,17 @@ fn main() {
         let strides = vec![8usize, 16, 32];
         let shapes: Vec<(usize, usize)> = feats.iter().map(|f| (f.h() as usize, f.w() as usize)).collect();
         let (anchors, s_list) = make_anchors(&shapes, &strides);
-        let boxes = model.head.forward_box(&feats);
-        let cls = model.head.forward_cls(&feats);
-        let dets: Vec<_> = if use_nms {
-            nms_decode(&boxes, &cls, &anchors, &s_list, model.nc, conf, iou, max_det)
-        } else {
-            end2end_decode(&boxes, &cls, &anchors, &s_list, model.nc, max_det, conf)
-        };
+        let _boxes = model.head.forward_box(&feats);
+        let _cls = model.head.forward_cls(&feats);
         last_t = t0.elapsed();
         last_p3_max = minmax(&p3.data).1;
         last_p4_max = minmax(&p4.data).1;
         last_p5_max = minmax(&p5.data).1;
         if i == 0 || i == bench_iters - 1 {
-            eprintln!("iter {}: forward+decode in {:?}", i, last_t);
+            eprintln!("iter {}: forward in {:?}", i, last_t);
         }
     }
-    eprintln!("average over {} iters: {:?}", bench_iters, last_t);
+    eprintln!("average over {} iters (forward only): {:?}", bench_iters, last_t);
 
     // Final detection output (re-run for display)
     let (p3, p4, p5) = model.forward(&input);
