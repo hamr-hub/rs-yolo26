@@ -471,9 +471,10 @@ impl Attention {
         }
         let v_t = Tensor::from_vec(v_nchw, vec![n as u64, c as u64, h as u64, w as u64]);
         let pe = crate::nn::dw_conv2d(&v_t, &self.pe_w, &self.pe_b, (1, 1), (1, 1));
+        // Ultralytics: x = attn_out + pe(v), NOT x + attn_out + pe(v). The PSABlock adds the residual.
         let mut x2 = vec![0f32; n * c * h * w];
         for i in 0..(n * c * h * w) {
-            x2[i] = x.data[i] + o[i] + pe.data[i];
+            x2[i] = o[i] + pe.data[i];
         }
         let x2_t = Tensor::from_vec(x2, x.shape.clone());
         conv2d(&x2_t, &self.proj_w, &self.proj_b, (1, 1), (0, 0))
