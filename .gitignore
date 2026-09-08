@@ -1,0 +1,7 @@
+target/
+Cargo.lock
+*.bin
+*.ppm
+*.jpg
+__pycache__/
+*.pyc
