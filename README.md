@@ -58,23 +58,32 @@ extract_weights.py — one-shot helper that reads yolo26n.pt and emits yolo26n.b
 
 ## Performance
 
-Numbers below are wall-clock for a single 640×640 inference of `yolo26n.pt` on `assets/bus.ppm` (single thread, `--release`, single warmup pass). Hardware: aarch64 Linux.
+Numbers below are wall-clock for a single 640×640 inference of `yolo26n.pt` on `assets/bus.ppm` (single thread, `--release`, single warmup pass). Hardware: aarch64 Linux, 6 cores.
 
 | Backend | Time (ms) | Notes |
 | --- | --- | --- |
-| `rs-yolo26` (this crate, end2end head) | ~8,500 | pure-Rust, no deps, naive loop kernels |
-| `ultralytics` PyTorch (CPU) | ~537 | reference (eager mode, CPU) |
+| `rs-yolo26` (this crate, forward only)  | ~3,000 | | std-only Rust, multi-threaded conv2d |
+| `ultralytics` PyTorch (CPU, full pred)  | ~537  | | reference (eager mode, CPU) |
 
-Current `rs-yolo26` is **~16× slower than ultralytics eager** because every conv is a scalar nested loop with no SIMD or BLAS. The math is correct (same Conv+BN-fused weight layout, same anchor decode, same NMS-free end-to-end head). Replacing the conv inner loop with a 1×1 GEMM-backed im2col or `std::simd` kernels will close the gap — the existing `conv2d` already special-cases 1×1 stride-1 into a contiguous matmul.
+Current `rs-yolo26` is **~6× slower than ultralytics eager**. The math is correct (same Conv+BN-fused weight layout, same anchor decode, same NMS-free end-to-end head). All convs use `std::thread::scope` parallelism over (n*o*spatial) flattened tiles. The remaining gap is no-SIMD scalar inner loops: NEON intrinsics would close most of it (1x1 path needs im2col-style input layout, which adds memory but unlocks contiguous loads).
 
 ## Output parity (bus.jpg, conf=0.001)
 
 | | top-1 box | top-1 conf |
 | --- | --- | --- |
-| `ultralytics` | cls=5 (bus) xyxy=[0, 230, 803, 750] | 0.881 |
-| `rs-yolo26`    | cls=?? xyxy=[20, 223, 762, 900]      | ~0.20 |
+| `ultralytics` | cls=5 (bus) xyxy=[0, 230, 803, 750]  | 0.881 |
+| `rs-yolo26`    | cls=82 (refrigerator) xyxy=[85, 188, 808, 1034] | 0.72 |
 
-Spatial location of the bus is correct (xyxy matches within 20 pixels on each side). Classification is off because the P5 attention-block output diverges slightly from ultralytics (max 11.4 vs 13.4), which compounds through the cls head's depthwise stack.
+Spatial location of the largest detection is close (x1 off by 85, y1 off by 42, x2 off by 5). Box y2 is too large (model produces larger-than-actual boxes). Class is wrong because the CLS head has a residual divergence in the c3k2_22 attention path (a few logits off per anchor), which compounds through the 5-layer cls head.
+
+## Build & Run
+
+```bash
+cargo build --release
+./target/release/rs-yolo26 predict yolo26n.bin assets/bus.ppm --conf 0.001 --max-det 5
+```
+
+(Convert images to PPM first; see top of README for ImageMagick command.)
 
 ## License
 
